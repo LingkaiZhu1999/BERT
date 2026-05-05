@@ -4,22 +4,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class SwiGLU(torch.nn.Module):
+class BertFFN(torch.nn.Module):
     def __init__(self, d_model, dff, device=None, dtype=None):
         super().__init__()
-        self.d_model = d_model
-        self.dff = dff
         self.linear1 = nn.Linear(d_model, dff)
         self.linear2 = nn.Linear(dff, d_model)
-        self.linear3 = nn.Linear(d_model, dff)
 
     def forward(self, x):
-        x1 = self.linear1(x)
-        x1 = x1 * torch.sigmoid(x1)
-        x2 = self.linear3(x)
-        x3 = x1 * x2
-        x3 = self.linear2(x3)
-        return x3
+        x = self.linear1(x)
+        x = F.gelu(x)
+        x = self.linear2(x)
+        return x
 
 
 class MultiheadSelfAttention(torch.nn.Module):
@@ -68,11 +63,11 @@ class TransformerBlock(torch.nn.Module):
         self.rmsnorm1 = nn.RMSNorm(d_model)
         self.rmsnorm2 = nn.RMSNorm(d_model)
         self.multihead_self_att = MultiheadSelfAttention(d_model, num_heads)
-        self.swiglu = SwiGLU(d_model, d_ff)
+        self.ffn = BertFFN(d_model, d_ff)
 
     def forward(self, x, attention_mask=None):
         x = x + self.multihead_self_att(self.rmsnorm1(x), attention_mask=attention_mask)
-        x = x + self.swiglu(self.rmsnorm2(x))
+        x = x + self.ffn(self.rmsnorm2(x))
         return x
 
 
@@ -172,4 +167,3 @@ if __name__ == "__main__":
     print(outputs["last_hidden_state"].shape)
     print(outputs["mlm_logits"].shape)
     print(outputs["nsp_logits"].shape)
-
