@@ -37,6 +37,7 @@ def load_model(args, vocab_size: int) -> Transformer_Bert:
         vocab_size=vocab_size,
         context_length=args.context_length,
         num_layers=args.num_layers,
+        dropout=args.dropout,
     ).to(args.device)
     checkpoint = torch.load(args.checkpoint, map_location=args.device)
     model_state = checkpoint.get("model_state_dict", checkpoint)
@@ -102,6 +103,7 @@ def parse_args():
     parser.add_argument("--d_ff", type=int, default=1344)
     parser.add_argument("--num_layers", type=int, default=8)
     parser.add_argument("--num_heads", type=int, default=16)
+    parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
     return parser.parse_args()
 
@@ -113,4 +115,5 @@ if __name__ == "__main__":
         tokenizer_json = json.load(f)
     vocab_size = len(tokenizer_json["model"]["vocab"])
     model = load_model(args, vocab_size=vocab_size)
+    model.eval()
     run_inference(model, tokenizer, args)
