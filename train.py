@@ -4,7 +4,7 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from transformer import Transformer_Bert
-from bert_preprocessing import BertPretrainingDataset
+from dataset import BertPretrainingDataset
 from utils import save_checkpoint
 from utils import learning_rate_schedule
 
@@ -29,6 +29,7 @@ def train(run, args):
         args.vocab_size,
         args.context_length,
         args.num_layers,
+        dropout=args.dropout,
     ).to(args.device)
     model = torch.compile(model)
     train_dataset = BertPretrainingDataset(
@@ -84,14 +85,17 @@ def train(run, args):
         token_type_ids = batch["token_type_ids"].to(args.device, non_blocking=True)
         attention_mask = batch["attention_mask"].to(args.device, non_blocking=True)
         mlm_labels = batch["mlm_labels"].to(args.device, non_blocking=True)
+        mlm_mask_positions = batch["mlm_mask_positions"].to(args.device, non_blocking=True)
         nsp_labels = batch["nsp_labels"].to(args.device, non_blocking=True)
 
         outputs = model(mlm_inputs, token_type_ids=token_type_ids, attention_mask=attention_mask)
+        batch_indices = torch.arange(mlm_inputs.size(0), device=args.device).unsqueeze(1)
+        masked_logits = outputs["mlm_logits"][batch_indices, mlm_mask_positions]
         mlm_loss = F.cross_entropy(
-            outputs["mlm_logits"].reshape(-1, args.vocab_size),
+            masked_logits.reshape(-1, args.vocab_size),
             mlm_labels.reshape(-1),
             ignore_index=-100,
-        )
+        ) 
         nsp_loss = F.cross_entropy(outputs["nsp_logits"], nsp_labels)
         loss = mlm_loss + args.nsp_loss_weight * nsp_loss
         loss.backward()
@@ -107,14 +111,14 @@ def train(run, args):
             f"iter: {step}, lr: {current_lr:.9f}, "
             f"loss: {loss.item():.5f}, mlm: {mlm_loss.item():.5f}, nsp: {nsp_loss.item():.5f}"
         )
-        if step % args.eval_interval == 0:
+        if (step + 1) % args.eval_interval == 0:
             valid_loss = validate(valid_loader, model, args)
             run.log({"loss/valid": valid_loss}) 
             print(f"iter: {step}, train loss: {loss.item()}, valid loss: {valid_loss}")
             if valid_loss < best_valid_loss:
                 best_valid_loss = valid_loss
                 save_checkpoint(model, optimizer, step, "bert_wikitext_pretrain_best.pt")
-        if step % args.save_interval == 0:
+        if (step + 1) % args.save_interval == 0:
             save_checkpoint(model, optimizer, step, "bert_wikitext_pretrain.pt")
 
 
@@ -132,10 +136,13 @@ def validate(valid_loader, model, args):
             token_type_ids = batch["token_type_ids"].to(args.device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(args.device, non_blocking=True)
             mlm_labels = batch["mlm_labels"].to(args.device, non_blocking=True)
+            mlm_mask_positions = batch["mlm_mask_positions"].to(args.device, non_blocking=True)
             nsp_labels = batch["nsp_labels"].to(args.device, non_blocking=True)
             outputs = model(mlm_inputs, token_type_ids=token_type_ids, attention_mask=attention_mask)
+            batch_indices = torch.arange(mlm_inputs.size(0), device=args.device).unsqueeze(1)
+            masked_logits = outputs["mlm_logits"][batch_indices, mlm_mask_positions]
             mlm_loss = F.cross_entropy(
-                outputs["mlm_logits"].reshape(-1, args.vocab_size),
+                masked_logits.reshape(-1, args.vocab_size),
                 mlm_labels.reshape(-1),
                 ignore_index=-100,
             )
@@ -161,21 +168,22 @@ if __name__ == "__main__":
         description="BERT",
         epilog="N/A",
     )
-    parser.add_argument("--iterations", type=int, default=10000, help="total iterations for training")
+    parser.add_argument("--iterations", type=int, default=200, help="total iterations for training")
     # parser.add_argument("--total_tokens_processed", type=int, default=100000, help="batch size * total step count * context length")
-    parser.add_argument("--save_interval", type=int, default=1000, help="interval to save model checkpoint")
-    parser.add_argument("--iter_warmup", type=int, default=100, help="warm up iterations")
-    parser.add_argument("--lr_max", type=float, default=3e-3, help="learning rate max")
-    parser.add_argument("--lr_min", type=float, default=3e-4, help="learning rate min")
-    parser.add_argument("--betas", type=float, nargs=2, default=(0.9, 0.95), help="betas for AdamW")
+    parser.add_argument("--save_interval", type=int, default=20, help="interval to save model checkpoint")
+    parser.add_argument("--iter_warmup", type=int, default=10, help="warm up iterations")
+    parser.add_argument("--lr_max", type=float, default=1e-2, help="learning rate max")
+    parser.add_argument("--lr_min", type=float, default=1e-3, help="learning rate min")
+    parser.add_argument("--betas", type=float, nargs=2, default=(0.9, 0.999), help="betas for AdamW")
     parser.add_argument("--eps", type=float, default=1e-8, help="eps for AdamW")
-    parser.add_argument("--weight_decay", type=float, default=0.1, help="weight decay (l1/l2 norm coefficient)")
+    parser.add_argument("--weight_decay", type=float, default=0.01, help="weight decay (l1/l2 norm coefficient)")
     parser.add_argument("--batch_size", type=int, default=128, help="batch size")
     parser.add_argument("--context_length", type=int, default=256, help="max sequence length")
     parser.add_argument("--d_model", type=int, default=512, help="dimension of model")
     parser.add_argument("--d_ff", type=int, default=1344, help="dimension of feed-forward network")
     parser.add_argument("--num_layers", type=int, default=8, help="number of layers")
     parser.add_argument("--num_heads", type=int, default=16, help="number of attention heads")
+    parser.add_argument("--dropout", type=float, default=0.1, help="dropout probability")
     parser.add_argument("--mlm_probability", type=float, default=0.15, help="token masking probability for MLM")
     parser.add_argument("--nsp_negative_prob", type=float, default=0.5, help="probability of sampling a negative NSP pair")
     parser.add_argument("--nsp_loss_weight", type=float, default=1.0, help="weight for NSP loss in total objective")
