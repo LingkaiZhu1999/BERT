@@ -57,7 +57,7 @@ def build_sentence_corpus(input_path: str):
             # 4. Only actual prose reaches this point
 
             for sent in split_into_sentences(line):
-                ids = wrapped_tokenizer.encode(sent, add_special_tokens=True)
+                ids = wrapped_tokenizer.encode(sent, add_special_tokens=False)
                 if not ids:
                     continue
                 sentence_ids.extend(ids)
