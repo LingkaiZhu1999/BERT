@@ -5,20 +5,22 @@ import torch.nn.functional as F
 
 
 class BertFFN(torch.nn.Module):
-    def __init__(self, d_model, dff, device=None, dtype=None):
+    def __init__(self, d_model, dff, dropout=0.1, device=None, dtype=None):
         super().__init__()
         self.linear1 = nn.Linear(d_model, dff)
         self.linear2 = nn.Linear(dff, d_model)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         x = self.linear1(x)
         x = F.gelu(x)
+        x = self.dropout(x)
         x = self.linear2(x)
         return x
 
 
 class MultiheadSelfAttention(torch.nn.Module):
-    def __init__(self, d_model: int, num_heads: int):
+    def __init__(self, d_model: int, num_heads: int, dropout=0.1):
         super().__init__()
         if d_model % num_heads != 0:
             raise ValueError("d_model must be divisible by num_heads")
@@ -26,10 +28,12 @@ class MultiheadSelfAttention(torch.nn.Module):
         self.num_heads = num_heads
         self.d_k = d_model // num_heads
         self.d_v = d_model // num_heads
+        self.dropout_p = dropout
         self.q_proj = nn.Linear(d_model, num_heads * self.d_k)
         self.k_proj = nn.Linear(d_model, num_heads * self.d_k)
         self.v_proj = nn.Linear(d_model, num_heads * self.d_v)
         self.o_proj = nn.Linear(d_model, num_heads * self.d_v)
+        self.output_dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
         Q = rearrange(self.q_proj(x), "... seq (num_heads d_q) -> ... num_heads seq d_q", num_heads=self.num_heads)
@@ -51,30 +55,40 @@ class MultiheadSelfAttention(torch.nn.Module):
                 torch.finfo(Q.dtype).min,
             )
 
-        attention = F.scaled_dot_product_attention(Q, K, V, attn_mask=attn_bias, is_causal=False)
+        attention = F.scaled_dot_product_attention(
+            Q,
+            K,
+            V,
+            attn_mask=attn_bias,
+            dropout_p=self.dropout_p if self.training else 0.0,
+            is_causal=False,
+        )
         attention = rearrange(attention, "... num_heads seq d_v -> ... seq (num_heads d_v)")
         output = self.o_proj(attention)
+        output = self.output_dropout(output)
         return output
 
 
 class TransformerBlock(torch.nn.Module):
-    def __init__(self, d_model, num_heads, d_ff):
+    def __init__(self, d_model, num_heads, d_ff, dropout=0.1):
         super().__init__()
         self.rmsnorm1 = nn.RMSNorm(d_model)
         self.rmsnorm2 = nn.RMSNorm(d_model)
-        self.multihead_self_att = MultiheadSelfAttention(d_model, num_heads)
-        self.ffn = BertFFN(d_model, d_ff)
+        self.multihead_self_att = MultiheadSelfAttention(d_model, num_heads, dropout=dropout)
+        self.ffn = BertFFN(d_model, d_ff, dropout=dropout)
+        self.ffn_output_dropout = nn.Dropout(dropout)
 
     def forward(self, x, attention_mask=None):
         x = x + self.multihead_self_att(self.rmsnorm1(x), attention_mask=attention_mask)
-        x = x + self.ffn(self.rmsnorm2(x))
+        x = x + self.ffn_output_dropout(self.ffn(self.rmsnorm2(x)))
         return x
 
 
 class BertMLMHead(torch.nn.Module):
-    def __init__(self, d_model, vocab_size):
+    def __init__(self, d_model, vocab_size, dropout=0.1):
         super().__init__()
         self.dense = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(d_model)
         self.decoder = nn.Linear(d_model, vocab_size, bias=False)
         self.bias = nn.Parameter(torch.zeros(vocab_size))
@@ -82,6 +96,7 @@ class BertMLMHead(torch.nn.Module):
     def forward(self, hidden_states):
         hidden_states = self.dense(hidden_states)
         hidden_states = F.gelu(hidden_states)
+        hidden_states = self.dropout(hidden_states)
         hidden_states = self.norm(hidden_states)
         return self.decoder(hidden_states) + self.bias
 
@@ -95,6 +110,7 @@ class Transformer_Bert(torch.nn.Module):
         vocab_size,
         context_length,
         num_layers,
+        dropout=0.1,
     ):
         super().__init__()
         self.context_length = context_length
@@ -102,11 +118,12 @@ class Transformer_Bert(torch.nn.Module):
         self.position_embeddings = nn.Embedding(context_length, d_model)
         self.token_type_embeddings = nn.Embedding(2, d_model)
         self.embedding_norm = nn.LayerNorm(d_model)
+        self.embedding_dropout = nn.Dropout(dropout)
         self.transformer_blocks = torch.nn.ModuleList(
-            [TransformerBlock(d_model, num_heads, d_ff) for _ in range(num_layers)]
+            [TransformerBlock(d_model, num_heads, d_ff, dropout=dropout) for _ in range(num_layers)]
         )
         self.final_norm = nn.LayerNorm(d_model)
-        self.mlm_head = BertMLMHead(d_model, vocab_size)
+        self.mlm_head = BertMLMHead(d_model, vocab_size, dropout=dropout)
         self.nsp_head = nn.Linear(d_model, 2)
 
         self.mlm_head.decoder.weight = self.token_embeddings.weight
@@ -131,6 +148,7 @@ class Transformer_Bert(torch.nn.Module):
             + self.token_type_embeddings(token_type_ids)
         )
         x = self.embedding_norm(x)
+        x = self.embedding_dropout(x)
 
         for transformer_block in self.transformer_blocks:
             x = transformer_block(x, attention_mask=attention_mask)
